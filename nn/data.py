@@ -6,7 +6,9 @@ from torch.utils.data import DataLoader, Dataset
 from nn import utils
 
 class NSynthClassificationDataset(Dataset):
-  def __init__(self, path: str, classification_key: str):
+  def __init__(self,
+               path: str,
+               classification_key: str):
     self.path = path
     self.classification_key = classification_key
     self.json_data = utils.load_data(os.path.join(self.path, "examples.json"))
@@ -36,7 +38,8 @@ class NSynthClassificationDataset(Dataset):
       frames = reader.read()
       signal = np.array(np.frombuffer(frames, dtype=np.int16), dtype=np.float32)
       signal = signal / 2 ** 15  # not 16, because 1 bit is used for sign
-      signal = np.pad(signal, (1, 0))  # put a 0 at the beginning, but not at the end!
+      signal = signal.reshape([-1, 1])
+      signal = signal[::16]
 
-    return signal, sample["instrument"]
+    return signal, sample[self.classification_key]
 

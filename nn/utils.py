@@ -2,6 +2,9 @@ import json
 import numpy as np
 from collections import defaultdict
 from typing import *
+import os
+import errno
+
 
 def groupby(data: Iterable[Any], keys: Iterable[Any]) -> Dict[Any, List[Any]]:
   keys_to_data = defaultdict(list)
@@ -49,3 +52,15 @@ class AverageMeter(object):
   def __str__(self):
     fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
     return fmtstr.format(**self.__dict__)
+
+
+def mkdir_p(path: str) -> None:
+  """Make sure a directory exists (like mkdir -p on the shell)"""
+  try:
+    os.makedirs(path)
+  except OSError as exc:
+    if exc.errno == errno.EEXIST and os.path.isdir(path):
+      pass
+    else:
+      raise
+

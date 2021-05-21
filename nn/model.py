@@ -1,7 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-
+from torchaudio.transforms import MFCC
+from typing import *
+import numpy as np
 
 class MultiClassClassifier(nn.Module):
   def __init__(self, input_dim: int, num_output_classes: int):
@@ -32,15 +34,95 @@ class LSTMEncoder(nn.Module):
     x, state = self.lstm(x) # [B,T,D]
     return x
 
+class ConvolutionalEncoder(nn.Module):
+  def __init__(self, input_dim: int, hidden_dim: int):
+    super().__init__()
+    stride = 1
+    kernel = 5
+    num_layers = 4
+    self.layers = nn.Sequential()
+    for i in range(num_layers):
+      _input_dim = input_dim if i == 0 else hidden_dim
+      self.layers.add_module(f"bn{i}", nn.BatchNorm1d(_input_dim))
+      self.layers.add_module(f"conv{i}", nn.Conv1d(_input_dim, hidden_dim, kernel_size=(kernel, ), stride=(stride, )))
+      self.layers.add_module(f"relu{i}", nn.ReLU())
 
-class LSTMClassifier(nn.Module):
+    print(f"Going to reduce the dimension of the input by {stride**num_layers}")
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # x: shape [B, D, T]
+    # convolutional layers expect [B, D, T]
+    x = self.layers(x)
+    x = x.transpose_(1, 2)
+    return x
+
+
+class CNNClassifier(nn.Module):
+
   def __init__(self, num_output_classes: int):
     super().__init__()
+    hidden_dim = 64
+    self.audio_processing = AudioProcessing()
+    self.classifier = MultiClassClassifier(hidden_dim, num_output_classes)
+    self.conv_encoder = ConvolutionalEncoder(self.audio_processing.output_dim(), hidden_dim)
 
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.audio_processing.forward(x)
+    x = self.conv_encoder.forward(x)  # shape [B, T, D]
+    x = x[:, -1, :]  # we just want the final state for the classification
+    return self.classifier.forward(x)
+
+
+class CNNLSTMClassifier(nn.Module):
+  def __init__(self, num_output_classes: int):
+    super().__init__()
     hidden_dim = 64
     self.classifier = MultiClassClassifier(hidden_dim, num_output_classes)
-    self.encoder = LSTMEncoder(hidden_dim)
+    self.conv_encoder = ConvolutionalEncoder(hidden_dim)
+    self.lstm_encoder = nn.LSTM(input_size=hidden_dim, hidden_size=hidden_dim,
+                                num_layers=2, batch_first=True)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    x = self.conv_encoder.forward(x) # shape [B, T, D]
+    x, _ = self.lstm_encoder.forward(x)
+    x = x[:,-1,:] # we just want the final state for the classification
+    return self.classifier.forward(x)
+
+
+def model_statistics(model: nn.Module):
+  num_params = 0
+  for name, param in model.named_parameters():
+    print(f"{name}: {param.shape}")
+    num_params += np.prod(param.shape)
+  print(f"Total number of parameters: {num_params}")
+
+
+class AudioProcessing(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.transform = MFCC(sample_rate=16_000)
+
+  def output_dim(self):
+    return self.transform.n_mfcc
 
   def forward(self, x):
-    x = self.encoder(x)[:,-1,:] # we just want the final state for the classification
-    return self.classifier(x)
+    # x: shape [B, T, 1]
+    x = x.squeeze(2)
+
+    # expects [B, T]
+    x = self.transform.forward(x)
+    return x
+
+
+def create_model(model_name: str, number_output_classes: int):
+  if model_name == "cnn-lstm":
+    return CNNLSTMClassifier(number_output_classes)
+  elif model_name == "cnn":
+    return CNNClassifier(number_output_classes)
+  else:
+    raise ValueError(f"No model found for {model_name}")
+
+
+# x_1^T, x_t in [-1, 1]
+# The problem is that T is 64k, we want it to be more like 200
+

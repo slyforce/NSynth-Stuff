@@ -11,5 +11,5 @@ def accuracy(y_pred: torch.Tensor, y: torch.Tensor):
   # y_pred has shape [B, C] C = number of Classes
   # y has shape [B]
   num_hits = accuracy_num_hits(y_pred, y)
-  num_samples = y.size()
-  return num_hits / num_samples, num_hits, num_samples
+  num_samples = y.size()[0]
+  return num_hits / num_samples
