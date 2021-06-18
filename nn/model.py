@@ -37,14 +37,17 @@ class LSTMEncoder(nn.Module):
 class ConvolutionalEncoder(nn.Module):
   def __init__(self, input_dim: int, hidden_dim: int):
     super().__init__()
-    stride = 1
+    stride = 2
     kernel = 5
     num_layers = 4
+    dropout = 0.2
     self.layers = nn.Sequential()
     for i in range(num_layers):
       _input_dim = input_dim if i == 0 else hidden_dim
-      self.layers.add_module(f"bn{i}", nn.BatchNorm1d(_input_dim))
-      self.layers.add_module(f"conv{i}", nn.Conv1d(_input_dim, hidden_dim, kernel_size=(kernel, ), stride=(stride, )))
+      #self.layers.add_module(f"bn{i}", nn.BatchNorm1d(_input_dim))
+      self.layers.add_module(f"dropout{i}", nn.Dropout(dropout))
+      self.layers.add_module(f"conv{i}", nn.Conv1d(_input_dim, hidden_dim, kernel_size=(kernel, )))
+      self.layers.add_module(f"maxpool{i}", nn.MaxPool1d(stride))
       self.layers.add_module(f"relu{i}", nn.ReLU())
 
     print(f"Going to reduce the dimension of the input by {stride**num_layers}")
@@ -52,25 +55,36 @@ class ConvolutionalEncoder(nn.Module):
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     # x: shape [B, D, T]
     # convolutional layers expect [B, D, T]
-    x = self.layers(x)
-    x = x.transpose_(1, 2)
-    return x
+    return self.layers(x)
 
 
 class CNNClassifier(nn.Module):
 
-  def __init__(self, num_output_classes: int):
+  def __init__(self, num_output_classes: int, hidden_dim: int):
     super().__init__()
-    hidden_dim = 64
+    dropout = 0.2
     self.audio_processing = AudioProcessing()
     self.classifier = MultiClassClassifier(hidden_dim, num_output_classes)
     self.conv_encoder = ConvolutionalEncoder(self.audio_processing.output_dim(), hidden_dim)
+    self.mlp = nn.Sequential(
+      nn.Dropout(dropout),
+      nn.Linear(hidden_dim, hidden_dim),
+      nn.ReLU(),
+      nn.Dropout(dropout),
+      nn.Linear(hidden_dim, hidden_dim),
+      nn.ReLU())
 
-  def forward(self, x: torch.Tensor) -> torch.Tensor:
-    x = self.audio_processing.forward(x)
-    x = self.conv_encoder.forward(x)  # shape [B, T, D]
-    x = x[:, -1, :]  # we just want the final state for the classification
-    return self.classifier.forward(x)
+  def forward(self, raw_audio_signal: torch.Tensor) -> torch.Tensor:
+
+    #print(f"Raw audio signal: {raw_audio_signal.size()}")
+    mfcc_features = self.audio_processing.forward(raw_audio_signal)
+    #print(f"Raw audio signal: {mfcc_features.size()}")
+
+    hidden_projections = self.conv_encoder.forward(mfcc_features)  # shape [B, D, T]
+    hidden_state, _ = torch.max(hidden_projections, dim=-1)
+    hidden_state = self.mlp(hidden_state)
+    log_probs = self.classifier.forward(hidden_state)
+    return log_probs
 
 
 class CNNLSTMClassifier(nn.Module):
@@ -111,14 +125,16 @@ class AudioProcessing(nn.Module):
 
     # expects [B, T]
     x = self.transform.forward(x)
+
+    # [B, D, T]
     return x
 
 
-def create_model(model_name: str, number_output_classes: int):
+def create_model(model_name: str, number_output_classes: int, hidden_dim: int):
   if model_name == "cnn-lstm":
     return CNNLSTMClassifier(number_output_classes)
   elif model_name == "cnn":
-    return CNNClassifier(number_output_classes)
+    return CNNClassifier(number_output_classes, hidden_dim)
   else:
     raise ValueError(f"No model found for {model_name}")
 

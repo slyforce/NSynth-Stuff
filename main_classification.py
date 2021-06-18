@@ -1,8 +1,12 @@
+import dataclasses
+
 import torch
+from torch.nn import functional as F
 import os
 import json
 import numpy as np
 import time
+from collections import defaultdict
 
 import argparse
 
@@ -14,6 +18,16 @@ from nn import utils
 from nn import data
 from nn import losses
 
+
+def str2bool(v):
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ('yes', 'true', 't', 'y', '1'):
+    return True
+  elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+    return False
+  else:
+    raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def get_arguments():
   parser = argparse.ArgumentParser()
@@ -29,11 +43,14 @@ def get_arguments():
   parser.add_argument("--batch_size", type=int, default=128, help="")
   parser.add_argument("--evaluate_after_n_steps", type=int, default=100, help="")
 
-  parser.add_argument("--gpu", action="store_true", help="")
+  parser.add_argument("--gpu", type=str2bool, default=False, help="")
   parser.add_argument("--num_data_workers", type=int, default=1, help="")
 
   parser.add_argument("--model_name", type=str, default="cnn",
                       help="Which model to use. ")
+  parser.add_argument("--model_hidden_dim",
+                      type=int, default=256, help="")
+
 
   parser.add_argument("--model_directory",
                       type=str, default="/tmp/model",
@@ -50,28 +67,47 @@ def get_arguments():
 
 ARGS = get_arguments()
 
+@dataclasses.dataclass
+class EvalStatistics:
+  N: int = 0 
+  num_hits: int = 0  
+  total_loss: float = 0.0
+
+  def accuracy(self):
+    return self.num_hits * 100 / self.N
+
+  def mean_loss(self):
+    return self.total_loss /self.N
+
 
 def eval(model: torch.nn.Module, dataset: DataLoader):
   model.eval()
 
-  acc_meter = nn.utils.AverageMeter("Accuracy")
-  loss_meter = nn.utils.AverageMeter("Loss")
-  loss_mod = torch.nn.NLLLoss()
+  
+  stats_per_class = defaultdict(EvalStatistics)
   for x, y in dataset:
     if ARGS.gpu:
       x = x.cuda()
       y = y.cuda()
     B = x.size()[0]
 
-    y_logprobs = model(x)
-    loss = loss_mod(y_logprobs, y)
-    num_hits = nn.losses.accuracy_num_hits(y_logprobs, y)
+    y_logprobs = model(x) # shape [B, C]
 
-    acc_meter.update(num_hits, n=B)
-    loss_meter.update(loss, n=B)
+    for i in range(B):
+      c = y[i].item()
+      stats_per_class[c].N += 1
+      stats_per_class[c].num_hits += (torch.argmax(y_logprobs[i, :]) == c).long().item()
+      stats_per_class[c].total_loss += y_logprobs[i, c].item()
 
-  print(f"Evaluation results: {acc_meter} {loss_meter}")
-
+  accuracy = sum(s.num_hits for s in stats_per_class.values()) / sum(s.N for s in stats_per_class.values()) * 100
+  mean_loss = sum(s.total_loss for s in stats_per_class.values()) / sum(s.N for s in stats_per_class.values())
+  print(f"Evaluation results:")
+  print(f"  Accuracy: {accuracy}")
+  print(f"  NLL-Loss: {mean_loss}")
+  for c, stats in sorted(stats_per_class.items(), key=lambda x:x[0]):
+    print(f"Evaluation results for class {c}:")
+    print(f"  Accuracy: {stats.accuracy()}")
+    print(f"  NLL-Loss: {stats.mean_loss()}")
 
 def train(model: torch.nn.Module, opt, train_dataset: DataLoader, validation_dataset: DataLoader):
 
@@ -79,8 +115,7 @@ def train(model: torch.nn.Module, opt, train_dataset: DataLoader, validation_dat
   acc_meter = nn.utils.AverageMeter("Accuracy")
   speed_meter = nn.utils.AverageMeter("s/step")
 
-  loss_mod = torch.nn.NLLLoss()
-  num_steps = 0 
+  num_steps = 0
   for epoch in range(100):
     model.train()
     for x, y in train_dataset:
@@ -96,18 +131,23 @@ def train(model: torch.nn.Module, opt, train_dataset: DataLoader, validation_dat
 
       acc_meter.update(nn.losses.accuracy(y_logprobs, y))
 
-      loss = loss_mod(y_logprobs, y)
+      loss = F.nll_loss(y_logprobs, y, reduction="mean")
       loss.backward()
+
       opt.step()
       loss_meter.update(loss.item())
       speed_meter.update(time.time() - tstart)
 
-      if num_steps % 10 == 0:
+      if num_steps % 50 == 0:
         print(f"epoch={epoch} step={num_steps} {loss_meter} {speed_meter} {acc_meter}")
-      if num_steps % 100 == 0:
+      if num_steps % 1000 == 0:
         print(f"Evaluating after {num_steps}")
         eval(model, validation_dataset)
         save_model(model, ARGS.model_directory, num_steps)
+
+        loss_meter.reset()
+        speed_meter.reset()
+        acc_meter.reset()
 
 
 def save_model(model: torch.nn.Module, directory: str, step: int):
@@ -126,7 +166,7 @@ def command_evaluate():
   ds_valid = data.NSynthClassificationDataset(ARGS.valid_data, "instrument_family")
   valid_dl = DataLoader(ds_valid, batch_size=ARGS.batch_size, num_workers=ARGS.num_data_workers)
 
-  model = nn.model.create_model(ARGS.model_name, ds_train.num_classes())
+  model = nn.model.create_model(ARGS.model_name, ds_train.num_classes(), ARGS.model_hidden_dim)
   if ARGS.load_model_from:
     load_model(model, ARGS.load_model_from)
   nn.model.model_statistics(model)
@@ -158,7 +198,7 @@ def command_train():
   train_dl = DataLoader(ds_train, batch_size=ARGS.batch_size, shuffle=True, num_workers=ARGS.num_data_workers)
   valid_dl = DataLoader(ds_valid, batch_size=ARGS.batch_size, num_workers=ARGS.num_data_workers)
 
-  model = nn.model.create_model(ARGS.model_name, ds_train.num_classes())
+  model = nn.model.create_model(ARGS.model_name, ds_train.num_classes(), ARGS.model_hidden_dim)
   utils.mkdir_p(ARGS.model_directory)
   if ARGS.load_model_from:
     load_model(model, ARGS.load_model_from)
@@ -167,7 +207,7 @@ def command_train():
   if ARGS.gpu:
     model = model.cuda()
 
-  opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+  opt = torch.optim.Adam(model.parameters(), lr=5e-4)
   train(model, opt, train_dl, valid_dl)
 
 

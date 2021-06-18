@@ -51,7 +51,8 @@ class AverageMeter(object):
 
   def __str__(self):
     fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
-    return fmtstr.format(**self.__dict__)
+    ret = fmtstr.format(**self.__dict__)
+    return ret
 
 
 def mkdir_p(path: str) -> None:

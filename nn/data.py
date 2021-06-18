@@ -39,7 +39,5 @@ class NSynthClassificationDataset(Dataset):
       signal = np.array(np.frombuffer(frames, dtype=np.int16), dtype=np.float32)
       signal = signal / 2 ** 15  # not 16, because 1 bit is used for sign
       signal = signal.reshape([-1, 1])
-      signal = signal[::16]
-
     return signal, sample[self.classification_key]
 
